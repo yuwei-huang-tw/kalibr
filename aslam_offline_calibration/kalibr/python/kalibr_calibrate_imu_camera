@@ -148,7 +148,6 @@ def main():
     imus = list()
     for i, (imu_yaml, imu_model) in enumerate(zip(parsed.imu_yamls, parsed.imu_models)):
         imuConfig = kc.ImuParameters(imu_yaml)
-        imuConfig.printDetails()
         if imu_model == 'calibrated':
             imus.append( sens.IccImu(imuConfig, parsed, isReferenceImu=(not imus), \
                          estimateTimedelay=parsed.estimate_imu_delay, imuNr=i) )
@@ -161,6 +160,8 @@ def main():
         else:
             sm.logError("Model {0} is currently unsupported.".format(imu_model))
             sys.exit(2)
+        imuConfig.setUpdateRate(imus[-1].dataset.estimateUpdateRate())
+        imuConfig.printDetails()
     
     #load calibration target configuration 
     targetConfig = kc.CalibrationTargetParameters(parsed.target_yaml)

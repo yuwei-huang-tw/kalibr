@@ -121,3 +121,22 @@ class BagImuDatasetReader(object):
         alpha = np.array( [data.linear_acceleration.x, data.linear_acceleration.y, data.linear_acceleration.z] )
         
         return (timestamp, omega, alpha)
+
+    def estimateUpdateRate(self, sigma=3, max_iter=10):
+        timestamps = []
+        for idx in self.indices:
+            topic, data, stamp = self.bag._read_message(self.index[idx].position)
+            timestamps.append(data.header.stamp.secs + data.header.stamp.nsecs/1e9)
+
+        dt = np.diff(np.asarray(timestamps))
+        mean = np.mean(dt)
+        mask = np.ones(len(dt), dtype=bool)
+        for _ in range(max_iter):
+            dt_ = dt[mask]
+            mean = np.mean(dt_)
+            std = np.std(dt_)
+            new_mask = np.abs(dt - mean) <= sigma * std
+            if np.array_equal(mask, new_mask):
+                break
+            mask = new_mask
+        return float(1/mean)
