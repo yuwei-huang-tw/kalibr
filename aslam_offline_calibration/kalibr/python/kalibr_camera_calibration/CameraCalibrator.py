@@ -145,7 +145,7 @@ class CalibrationTarget(object):
 
 class CalibrationTargetOptimizationProblem(ic.CalibrationOptimizationProblem):        
     @classmethod
-    def fromTargetViewObservations(cls, cameras, target, baselines, timestamp, T_tc_guess, rig_observations, useBlakeZissermanMest=True):
+    def fromTargetViewObservations(cls, cameras, target, baselines, timestamp, T_tc_guess, rig_observations, useBlakeZissermanMest=True, projectionActive=True, distortionActive=True):
         rval = CalibrationTargetOptimizationProblem()        
 
         #store the arguements in case we want to rebuild a modified problem
@@ -176,7 +176,7 @@ class CalibrationTargetOptimizationProblem(ic.CalibrationOptimizationProblem):
         for camera in cameras:
             if not camera.isGeometryInitialized:
                 raise RuntimeError('The camera geometry is not initialized. Please initialize with initGeometry() or initGeometryFromDataset()')
-            camera.setDvActiveStatus(True, True, False)
+            camera.setDvActiveStatus(projectionActive, distortionActive, False)
             rval.addDesignVariable(camera.dv.distortionDesignVariable(), CALIBRATION_GROUP_ID)
             rval.addDesignVariable(camera.dv.projectionDesignVariable(), CALIBRATION_GROUP_ID)
             rval.addDesignVariable(camera.dv.shutterDesignVariable(), CALIBRATION_GROUP_ID)
@@ -223,7 +223,7 @@ class CalibrationTargetOptimizationProblem(ic.CalibrationOptimizationProblem):
         sm.logDebug("Adding a view with {0} cameras and {1} error terms".format(len(cams_in_view), rerr_cnt))
         return rval
 
-def removeCornersFromBatch(batch, camId_cornerIdList_tuples, useBlakeZissermanMest=True):
+def removeCornersFromBatch(batch, camId_cornerIdList_tuples, useBlakeZissermanMest=True, projectionActive=True, distortionActive=True):
     #translate (camid,obs) tuple to dict
     obsdict=dict()
     for cidx, obs in batch.rig_observations:
@@ -244,7 +244,9 @@ def removeCornersFromBatch(batch, camId_cornerIdList_tuples, useBlakeZissermanMe
                                                                                   batch.timestamp, 
                                                                                   batch.T_tc_guess, 
                                                                                   batch.rig_observations,
-                                                                                  useBlakeZissermanMest=useBlakeZissermanMest)
+                                                                                  useBlakeZissermanMest=useBlakeZissermanMest,
+                                                                                  projectionActive=projectionActive,
+                                                                                  distortionActive=distortionActive)
 
     return new_problem
         
@@ -269,9 +271,9 @@ class CameraCalibration(object):
     def getBaseline(self, i):
         return self.baselines[i]
     
-    def addTargetView(self, timestamp, rig_observations, T_tc_guess, force=False):
+    def addTargetView(self, timestamp, rig_observations, T_tc_guess, force=False, projectionActive=True, distortionActive=True):
         #create the problem for this batch and try to add it 
-        batch_problem = CalibrationTargetOptimizationProblem.fromTargetViewObservations(self.cameras, self.target, self.baselines, timestamp, T_tc_guess, rig_observations, useBlakeZissermanMest=self.useBlakeZissermanMest)
+        batch_problem = CalibrationTargetOptimizationProblem.fromTargetViewObservations(self.cameras, self.target, self.baselines, timestamp, T_tc_guess, rig_observations, useBlakeZissermanMest=self.useBlakeZissermanMest, projectionActive=projectionActive, distortionActive=distortionActive)
         self.estimator_return_value = self.estimator.addBatch(batch_problem, force)
         
         if self.estimator_return_value.numIterations >= self.optimizerOptions.maxIterations:

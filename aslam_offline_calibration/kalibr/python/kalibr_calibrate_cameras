@@ -11,6 +11,7 @@ import aslam_cv_backend as acvb
 import kalibr_common as kc
 import kalibr_camera_calibration as kcc
 
+import yaml
 import cv2
 import os
 import numpy as np
@@ -89,6 +90,8 @@ def parseArgs():
 
     groupTarget = parser.add_argument_group('Calibration target configuration')
     groupTarget.add_argument('--target', dest='targetYaml', help='Calibration target configuration as yaml file', required=True)
+    groupTarget.add_argument('--projection-parameters', dest='projParaYaml',default='', help='Projection parameters as yaml file', required=False)
+    groupTarget.add_argument('--distortion-parameters', dest='distParaYaml',default='', help='Distortion parameters as yaml file', required=False)
     
     groupTarget = parser.add_argument_group('Image synchronization')
     groupTarget.add_argument('--approx-sync', dest='max_delta_approxsync', type=float, default=0.02, help='Time tolerance for approximate image synchronization [s] (default: %(default)s)')
@@ -152,6 +155,23 @@ def main():
     #register signal handler
     signal.signal(signal.SIGINT, signal_exit)
 
+    using_projParaYaml = parsed.projParaYaml != ""
+    using_distParaYaml = parsed.distParaYaml != ""
+    projection_prarameters = []
+    distortion_prarameters = []
+    if using_projParaYaml:
+        with open(parsed.projParaYaml, 'r') as prara_fd:
+            para_dict = yaml.safe_load(prara_fd)
+        cam_names = sorted(list(para_dict.keys()))
+        print(f"Get all cameras projection prarameters {cam_names}")
+        projection_prarameters = [np.array(para_dict[name]['intrinsics']) for name in cam_names]
+    if using_distParaYaml:
+        with open(parsed.distParaYaml, 'r') as prara_fd:
+            para_dict = yaml.safe_load(prara_fd)
+        cam_names = sorted(list(para_dict.keys()))
+        print(f"Get all cameras distortion prarameters {cam_names}")
+        distortion_prarameters = [np.array(para_dict[name]['distortion_coeffs']) for name in cam_names]
+
     targetConfig = kc.CalibrationTargetParameters(parsed.targetYaml)
 
     #create camera objects, initialize the intrinsics and extract targets
@@ -185,8 +205,15 @@ def main():
                 obsdb.addObservation(cam_id, obs)
 
             #initialize the intrinsics
+            # cam.initGeometryFromObservations cannot be removed, otherwise graph.getInitialGuesses will result in nan
             if not cam.initGeometryFromObservations(observations):
                 raise RuntimeError("Could not initialize the intrinsics for camera with topic: {0}. Try to use --verbose and check whether the calibration target extraction is successful.".format(topic))
+            if using_projParaYaml:
+                cam.geometry.projection().setParameters(projection_prarameters[cam_id])
+                print("Using projection parameters from yaml file")
+            if using_distParaYaml:
+                cam.geometry.projection().distortion().setParameters(distortion_prarameters[cam_id])
+                print("Using distortion parameters from yaml file")
             
             print("\tProjection initialized to: %s" % cam.geometry.projection().getParameters().flatten())
             print("\tDistortion initialized to: %s" % cam.geometry.projection().distortion().getParameters().flatten())
@@ -216,7 +243,7 @@ def main():
             #compute initial guesses for the baselines, intrinsics
             print("initializing initial guesses")
             if len(cameraList)>1:
-                baseline_guesses = graph.getInitialGuesses(cameraList)
+                baseline_guesses = graph.getInitialGuesses(cameraList, projectionActive=not using_projParaYaml, distortionActive=not using_distParaYaml)
             else:
                 baseline_guesses=[]
                 
@@ -274,10 +301,10 @@ def main():
                     est_baselines.append( sm.Transformation(baseline.T()) )
                 T_tc_guess = graph.getTargetPoseGuess(timestamp, cameraList, est_baselines)
                                
-                success = calibrator.addTargetView(timestamp, obs_tuple, T_tc_guess)
+                success = calibrator.addTargetView(timestamp, obs_tuple, T_tc_guess, projectionActive=not using_projParaYaml, distortionActive=not using_distParaYaml)
                 
                 #display process
-                if (verbose or (view_id % 25) == 0) and calibrator.estimator.getNumBatches()>0 and view_id>1:
+                if (verbose and (view_id % 25) == 0) and calibrator.estimator.getNumBatches()>0 and view_id>1:
                     print("")
                     print("------------------------------------------------------------------")
                     print("")
@@ -371,7 +398,7 @@ def main():
                         removeCount = sum([len(removelist) for cidx, removelist in cornerRemovalList_allCams])
                         if removeCount>0:
                             original_batch = calibrator.views[batch_id]
-                            new_batch = kcc.removeCornersFromBatch(original_batch, cornerRemovalList_allCams, useBlakeZissermanMest=parsed.doBlakeZisserman)
+                            new_batch = kcc.removeCornersFromBatch(original_batch, cornerRemovalList_allCams, useBlakeZissermanMest=parsed.doBlakeZisserman, projectionActive=not using_projParaYaml, distortionActive=not using_distParaYaml)
                             
                             #replace the original batch with the corrected
                             calibrator.estimator.removeBatch( calibrator.views[batch_id] )
@@ -453,7 +480,13 @@ def main():
                     print("Reinitialize the intrinsics for camera {0}".format(cam_id))
                     observations = obsdb.getAllObsCam(cam_id)
                     if not cam.initGeometryFromObservations(observations):
-                        raise RuntimeError("Could not re-initialize the intrinsics for camera with topic: {0}".format(topic))
+                        raise RuntimeError("Could not re-initialize the intrinsics for camera {0}".format(cam_id))
+                    if using_projParaYaml:
+                        cam.geometry.projection().setParameters(projection_prarameters[cam_id])
+                        print("Using projection parameters from yaml file")
+                    if using_distParaYaml:
+                        cam.geometry.projection().distortion().setParameters(distortion_prarameters[cam_id])
+                        print("Using distortion parameters from yaml file")
                     
                     print("\tProjection initialized to: %s" % cam.geometry.projection().getParameters().flatten())
                     print("\tDistortion initialized to: %s" % cam.geometry.projection().distortion().getParameters().flatten())

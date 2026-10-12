@@ -112,7 +112,7 @@ class MulticamCalibrationGraph(object):
     #returns: 
     #        baselines:    list of baselines starting from cam0 to camN
     #                      direction: baseline_O => cam0 to cam1 (T_c1_c0)
-    def getInitialGuesses(self, cameras):
+    def getInitialGuesses(self, cameras, projectionActive=True, distortionActive=True):
         
         if not self.G:
             raise RuntimeError("Graph is uninitialized!")
@@ -176,6 +176,7 @@ class MulticamCalibrationGraph(object):
             success, baseline_HL = kcc.stereoCalibrate(cameras[camL_nr], 
                                                        cameras[camH_nr], 
                                                        obs_list,
+                                                       projectionActive=projectionActive,
                                                        distortionActive=False)
             
             if success:
@@ -226,7 +227,9 @@ class MulticamCalibrationGraph(object):
         #################################################################
         ## STEP 4: refine guess in full batch
         #################################################################
-        success, baselines = kcc.solveFullBatch(cameras, baselines, self)
+        success, baselines = kcc.solveFullBatch(cameras, baselines, self,
+                                                projectionActive=projectionActive,
+                                                distortionActive=distortionActive)
         
         if not success:
             sm.logWarn("Full batch refinement failed!")

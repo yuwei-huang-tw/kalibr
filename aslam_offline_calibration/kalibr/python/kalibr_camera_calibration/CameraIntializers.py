@@ -12,7 +12,7 @@ def addPoseDesignVariable(problem, T0=sm.Transformation()):
     problem.addDesignVariable(t_Dv)
     return aopt.TransformationBasicDv( q_Dv.toExpression(), t_Dv.toExpression() )
 
-def stereoCalibrate(camL_geometry, camH_geometry, obslist, distortionActive=False, baseline=None):
+def stereoCalibrate(camL_geometry, camH_geometry, obslist, projectionActive=True, distortionActive=False, baseline=None):
     #####################################################
     ## find initial guess as median of  all pnp solutions
     #####################################################
@@ -70,8 +70,8 @@ def stereoCalibrate(camL_geometry, camH_geometry, obslist, distortionActive=Fals
         target_pose_dvs.append(target_pose_dv)
     
     #add camera dvs
-    camL_geometry.setDvActiveStatus(True, distortionActive, False)
-    camH_geometry.setDvActiveStatus(True, distortionActive, False)
+    camL_geometry.setDvActiveStatus(projectionActive, distortionActive, False)
+    camH_geometry.setDvActiveStatus(projectionActive, distortionActive, False)
     problem.addDesignVariable(camL_geometry.dv.distortionDesignVariable())
     problem.addDesignVariable(camL_geometry.dv.projectionDesignVariable())
     problem.addDesignVariable(camL_geometry.dv.shutterDesignVariable())
@@ -275,7 +275,7 @@ def calibrateIntrinsics(cam_geometry, obslist, distortionActive=True, intrinsics
     return success
 
 
-def solveFullBatch(cameras, baseline_guesses, graph):    
+def solveFullBatch(cameras, baseline_guesses, graph, projectionActive=True, distortionActive=True):
     ############################################
     ## solve the bundle adjustment
     ############################################
@@ -283,7 +283,7 @@ def solveFullBatch(cameras, baseline_guesses, graph):
     
     #add camera dvs
     for cam in cameras:
-        cam.setDvActiveStatus(True, True, False)
+        cam.setDvActiveStatus(projectionActive, distortionActive, False)
         problem.addDesignVariable(cam.dv.distortionDesignVariable())
         problem.addDesignVariable(cam.dv.projectionDesignVariable())
         problem.addDesignVariable(cam.dv.shutterDesignVariable())
