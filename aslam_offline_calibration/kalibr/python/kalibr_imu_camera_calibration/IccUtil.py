@@ -104,6 +104,15 @@ def printGravity(cself):
     print("Gravity vector: (in target coordinates): [m/s^2]")
     print(cself.gravityDv.toEuclidean())
 
+def exportGravity(cself, filename="gravity_imucam.csv"):
+    gravity = np.asarray(cself.gravityDv.toEuclidean()).reshape(-1)
+    if gravity.size != 3:
+        raise ValueError("Expected a 3D gravity vector, got {0} elements".format(gravity.size))
+
+    with open(filename, 'w') as f:
+        print("#g_R_x [m/s^2], g_R_y [m/s^2], g_R_z [m/s^2]", file=f)
+        print(",".join("{:.17g}".format(value) for value in gravity), file=f)
+
 def printResults(cself, withCov=False):
     nCams = len(cself.CameraChain.camList)
     for camNr in range(0,nCams):
@@ -260,42 +269,70 @@ def generateReport(cself, filename="report.pdf", showOnScreen=True):
     if showOnScreen:
         plotter.show()
 
-def exportPoses(cself, filename="poses_imu0.csv"):
-    
-    # Append our header, and select times at IMU rate
-    f = open(filename, 'w')
-    print(
-        "#timestamp [ns], "
-        "p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], "
-        "q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z [], "
-        "v_RS_R_x [m/s], v_RS_R_y [m/s], v_RS_R_z [m/s], "
-        "b_w_RS_S_x [rad/s], b_w_RS_S_y [rad/s], b_w_RS_S_z [rad/s], "
-        "b_a_RS_S_x [m/s^2], b_a_RS_S_y [m/s^2], b_a_RS_S_z [m/s^2]",
-        file=f)
-    imu = cself.ImuList[0]
-    bodyspline = cself.poseDv.spline()
-    acc_bias = imu.accelBiasDv.spline()
-    gyro_bias = imu.gyroBiasDv.spline()
-    times = np.array([im.stamp.toSec() + imu.timeOffset for im in imu.imuData \
-                      if im.stamp.toSec() + imu.timeOffset > bodyspline.t_min() \
-                      and im.stamp.toSec() + imu.timeOffset < bodyspline.t_max() ])
+def exportPoses(cself, filename="poses_cam0.csv"):
+    cam = cself.CameraChain.camList[0]
+    observations = sorted(cam.targetObservations, key=lambda obs: obs.time().toSec())
 
-    # Times are in nanoseconds -> convert to seconds
-    # Use the ETH groundtruth csv format [t,q,p,v,bg,ba]
-    for time in times:
-        position =  bodyspline.position(time)
-        velocity =  bodyspline.linearVelocity(time)
-        orientation = sm.r2quat(bodyspline.orientation(time))
-        bw = gyro_bias.evalD(time,0)
-        ba = acc_bias.evalD(time,0)
+    with open(filename, 'w') as f:
         print(
-            "{:.0f}".format(1e9 * time)
-            + "," + ",".join(map("{:.6f}".format, position))
-            + "," + ",".join(map("{:.6f}".format, orientation))
-            + "," + ",".join(map("{:.6f}".format, velocity))
-            + "," + ",".join(map("{:.6f}".format, bw))
-            + "," + ",".join(map("{:.6f}".format, ba)),
+            "#timestamp [ns], "
+            "p_RC_R_x [m], p_RC_R_y [m], p_RC_R_z [m], "
+            "q_RC_x [], q_RC_y [], q_RC_z [], q_RC_w []",
             file=f)
+        for obs in observations:
+            T_t_c = obs.T_t_c()
+            position = T_t_c.t()
+            orientation = T_t_c.q()
+            print(
+                "{:.0f}".format(1e9 * obs.time().toSec())
+                + "," + ",".join(map("{:.6f}".format, position))
+                + "," + ",".join(map("{:.6f}".format, orientation)),
+                file=f)
+
+def exportSplines(
+        cself,
+        pose_filename="pose_spline_imu0.csv",
+        accel_bias_filename="accel_bias_spline_imu0.csv",
+        gyro_bias_filename="gyro_bias_spline_imu0.csv"):
+    imu = cself.ImuList[0]
+
+    common_columns = [
+        "#record_type", "index []", "knot [s]", "spline_order []",
+    ]
+    pose_columns = [
+        "coefficient_p_RS_R_x [m]", "coefficient_p_RS_R_y [m]", "coefficient_p_RS_R_z [m]",
+        "coefficient_phi_SR_x [rad]", "coefficient_phi_SR_y [rad]", "coefficient_phi_SR_z [rad]",
+    ]
+    ba_columns = [
+        "coefficient_b_a_S_x [m/s^2]", "coefficient_b_a_S_y [m/s^2]", "coefficient_b_a_S_z [m/s^2]",
+    ]
+    bw_columns = [
+        "coefficient_b_w_S_x [rad/s]", "coefficient_b_w_S_y [rad/s]", "coefficient_b_w_S_z [rad/s]",
+    ]
+
+    splines = [
+        (cself.poseDv.spline(), pose_filename, pose_columns),
+        (imu.accelBiasDv.spline(), accel_bias_filename, ba_columns),
+        (imu.gyroBiasDv.spline(), gyro_bias_filename, bw_columns),
+    ]
+
+    for spline, filename, coeff_columns in splines:
+        knots = spline.knots()
+        coefficients = np.asarray(spline.coefficients())
+        spline_order = spline.splineOrder()
+
+        with open(filename, "w") as f:
+            f.write(", ".join([*common_columns, *coeff_columns]) + "\n")
+
+            for index, knot in enumerate(knots):
+                f.write("knot, {0}, {1:.17g}, {2}, , , , , ,\n".format(
+                    index, knot, spline_order))
+
+            for index in range(coefficients.shape[1]):
+                values = ",".join(
+                    "{:.17g}".format(value) for value in coefficients[:, index])
+                f.write("coefficient, {0}, , {1}, {2}\n".format(
+                    index, spline_order, values))
 
 def saveResultTxt(cself, filename='cam_imu_result.txt'):
     f = open(filename, 'w')

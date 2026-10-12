@@ -102,7 +102,9 @@ def parseArgs():
     outputSettings.add_argument('--extraction-stepping', action='store_true', dest='extractionstepping', help='Show each image during calibration target extraction  (disables plots)', required=False)
     outputSettings.add_argument('--verbose', action='store_true', dest='verbose', help='Verbose output (disables plots)')
     outputSettings.add_argument('--dont-show-report', action='store_true', dest='dontShowReport', help='Do not show the report on screen after calibration.')
-    outputSettings.add_argument('--export-poses', action='store_true', dest='exportPoses', help='Export the optimized poses into a CSV (time_ns, position, quaterion)')
+    outputSettings.add_argument('--export-poses', action='store_true', dest='exportPoses', help='Export camera 0 poses estimated from the target observations to CSV.')
+    outputSettings.add_argument('--export-splines', action='store_true', dest='exportSplines', help='Export the optimized IMU0 pose/biases spline knots and coefficients to CSV.')
+    outputSettings.add_argument('--export-gravity', action='store_true', dest='exportGravity', help='Export the optimized gravity vector in world frame to CSV.')
 
     #print help if no argument is specified
     if len(sys.argv)==1:
@@ -184,6 +186,14 @@ def main():
         if imu is not imus[0]:
             imu.findOrientationPrior(imus[0])
 
+    bagtag = os.path.splitext(parsed.bagfile[0])[0]
+    if parsed.exportPoses:
+        print("Exporting camera 0 poses from target observations...")
+        posesFile = bagtag + "-poses-imucam-cam0.csv"
+        util.exportPoses(iCal, filename=posesFile)
+        print("  Poses written to {0}".format(posesFile))
+        print("")
+
     print("")
     print("Building the problem")
     iCal.buildProblem(splineOrder=6, 
@@ -216,7 +226,6 @@ def main():
     util.printResults(iCal, withCov=parsed.recover_cov)
     print("")
 
-    bagtag = os.path.splitext(parsed.bagfile[0])[0]
     yamlFilename = bagtag + "-camchain-imucam.yaml"
     iCal.saveCamChainParametersYaml(yamlFilename, withCov=parsed.recover_cov)
     print("Results written to:")
@@ -237,11 +246,21 @@ def main():
     print("  Report written to {0}".format(reportFile))
     print("")
 
-    if parsed.exportPoses:
-        print("Exporting poses...")
-        posesFile = bagtag + "-poses-imucam-imu0.csv"
-        util.exportPoses(iCal, filename=posesFile)
-        print("  Poses written to {0}".format(posesFile))
+    if parsed.exportSplines:
+        print("Exporting optimized pose spline...")
+        poseSplineFile = bagtag + "-pose-spline-imucam-imu0.csv"
+        BaSplineFile = bagtag + "-accel-bias-spline-imucam-imu0.csv"
+        BgSplineFile = bagtag + "-gyro-bias-spline-imucam-imu0.csv"
+        util.exportSplines(iCal, poseSplineFile, BaSplineFile, BgSplineFile)
+        print("  Pose spline written to {0}".format(poseSplineFile))
+        print("  Accel bias spline written to {0}".format(BaSplineFile))
+        print("  Gyro bias spline written to {0}".format(BgSplineFile))
+        print("")
+
+    if parsed.exportGravity:
+        gravityFile = bagtag + "-gravity-imucam.csv"
+        util.exportGravity(iCal, filename=gravityFile)
+        print("  Gravity vector written to {0}".format(gravityFile))
         print("")
 
 if __name__ == "__main__":

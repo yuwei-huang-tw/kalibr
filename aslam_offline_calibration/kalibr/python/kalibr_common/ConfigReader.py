@@ -472,6 +472,7 @@ class ImuParameters(ParametersBase):
         return self.data["update_rate"]
     
     def setUpdateRate(self, update_rate):
+        update_rate = float(update_rate)
         self.checkUpdateRate(update_rate)
         self.data["update_rate"] = update_rate
     
