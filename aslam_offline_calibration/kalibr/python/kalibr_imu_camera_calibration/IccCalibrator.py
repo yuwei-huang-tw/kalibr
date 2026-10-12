@@ -200,7 +200,16 @@ class IccCalibrator(object):
             ]
         ]
         P = aopt.SparseBlockMatrixXd()
-        self.optimizer.computePartialCovariances(brows, P, 1e-6)
+        try:
+            self.optimizer.computePartialCovariances(brows, P, 1e-6)
+        except Exception as e:
+            print("Fail to recover covariance:")
+            print(e)
+            self.cov_trafo_ic = np.ones((6, 6), dtype=float) * np.nan
+            self.cov_times = np.ones((len(self.CameraChain.camList), len(self.CameraChain.camList)), dtype=float) * np.nan
+            self.std_trafo_ic = np.sqrt(self.cov_trafo_ic.diagonal())
+            self.std_times = np.sqrt(self.cov_times.diagonal())
+            return
 
         #split and store the variance
         self.cov_trafo_ic = getPartialBlocks(P, brows[:2])
