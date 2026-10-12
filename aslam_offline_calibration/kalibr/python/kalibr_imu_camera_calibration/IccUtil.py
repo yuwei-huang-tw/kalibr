@@ -264,9 +264,18 @@ def exportPoses(cself, filename="poses_imu0.csv"):
     
     # Append our header, and select times at IMU rate
     f = open(filename, 'w')
-    print("#timestamp, p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z []", file=f)
+    print(
+        "#timestamp [ns], "
+        "p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], "
+        "q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z [], "
+        "v_RS_R_x [m/s], v_RS_R_y [m/s], v_RS_R_z [m/s], "
+        "b_w_RS_S_x [rad/s], b_w_RS_S_y [rad/s], b_w_RS_S_z [rad/s], "
+        "b_a_RS_S_x [m/s^2], b_a_RS_S_y [m/s^2], b_a_RS_S_z [m/s^2]",
+        file=f)
     imu = cself.ImuList[0]
     bodyspline = cself.poseDv.spline()
+    acc_bias = imu.accelBiasDv.spline()
+    gyro_bias = imu.gyroBiasDv.spline()
     times = np.array([im.stamp.toSec() + imu.timeOffset for im in imu.imuData \
                       if im.stamp.toSec() + imu.timeOffset > bodyspline.t_min() \
                       and im.stamp.toSec() + imu.timeOffset < bodyspline.t_max() ])
@@ -275,9 +284,18 @@ def exportPoses(cself, filename="poses_imu0.csv"):
     # Use the ETH groundtruth csv format [t,q,p,v,bg,ba]
     for time in times:
         position =  bodyspline.position(time)
+        velocity =  bodyspline.linearVelocity(time)
         orientation = sm.r2quat(bodyspline.orientation(time))
-        print("{:.0f},".format(1e9 * time) + ",".join(map("{:.6f}".format, position)) \
-               + "," + ",".join(map("{:.6f}".format, orientation)) , file=f)
+        bw = gyro_bias.evalD(time,0)
+        ba = acc_bias.evalD(time,0)
+        print(
+            "{:.0f}".format(1e9 * time)
+            + "," + ",".join(map("{:.6f}".format, position))
+            + "," + ",".join(map("{:.6f}".format, orientation))
+            + "," + ",".join(map("{:.6f}".format, velocity))
+            + "," + ",".join(map("{:.6f}".format, bw))
+            + "," + ",".join(map("{:.6f}".format, ba)),
+            file=f)
 
 def saveResultTxt(cself, filename='cam_imu_result.txt'):
     f = open(filename, 'w')
