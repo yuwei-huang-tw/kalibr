@@ -371,7 +371,7 @@ def saveChainParametersYaml(cself, resultFile, graph, withCov=False):
         camParams.setResolution( [P.ru(), P.rv()] )
         dist_coeffs = P.distortion().getParameters().flatten()
         camParams.setDistortion( distortionModel, dist_coeffs)
-        if withCov:
+        if withCov and cov_cameras[cam_id].size != 0: # it might be 0 x 0 array
             camParams.setCovariance(cov_cameras[cam_id])
 
         chain.addCameraAtEnd(camParams)
