@@ -23,30 +23,17 @@ def plotIMURates(cself, iidx, fno=1, clearFigure=True, noShow=False):
         rates.append(scale * (timestamps[idx] - timestamps[idx-1]))
     rate_avg = np.average(rates)
     rate_std = np.std(rates)
-    
-    #loop through and so z-test to find outliers
-    #https://en.wikipedia.org/wiki/Z-test
-    sizes = []
-    colors = []
-    for idx in range(0,len(rates)):
-        rate = rates[idx]
-        #if (abs(rate - rate_avg)/rate_std) > z_thresh:
-        #    sizes.append(5)
-        #    colors.append("r")
-        #else:
-        sizes.append(1)
-        colors.append("b")
-        # rates[idx] = abs(rate - rate_avg)
-        rates[idx] = rate
 
     #plot it    
     f = pl.figure(fno)
     if clearFigure:
         f.clf()
     f.suptitle("imu{0}: sample inertial rate".format(iidx))
-    pl.scatter(times, rates, s=sizes, c=colors, marker="x")
-    pl.text(0.1, 0.9, 'avg dt ('+unit+') = {:.2f} +- {:.4f}'.format(rate_avg, rate_std), fontsize=12, transform=f.gca().transAxes)
     pl.grid('on')
+    pl.axhline(rate_avg + rate_std * z_thresh, color="r", linestyle="dashed")
+    pl.axhline(rate_avg - rate_std * z_thresh, color="r", linestyle="dashed")
+    pl.scatter(times, rates, s=1, marker=",")
+    pl.text(0.1, 0.9, 'avg dt ('+unit+') = {:.2f} +- {:.4f}'.format(rate_avg, rate_std), fontsize=12, transform=f.gca().transAxes)
     pl.xlabel("time (s)")
     pl.ylabel("sample rate ("+unit+")")
     f.gca().set_xlim((min(times), max(times)))
@@ -86,7 +73,7 @@ def plotGyroErrorPerAxis(cself, iidx, fno=1, clearFigure=True, noShow=False):
     
     for i in range(3):
         pl.subplot(3, 1, i+1)
-        pl.plot(errors[:,i])
+        pl.plot(errors[:,i], lw=1)
         pl.xlabel('error index')
         pl.ylabel('error ($rad/s$)')
         pl.grid('on')
@@ -129,7 +116,7 @@ def plotAccelErrorPerAxis(cself, iidx, fno=1, clearFigure=True, noShow=False):
     
     for i in range(3):
         pl.subplot(3, 1, i+1)
-        pl.plot(errors[:,i])
+        pl.plot(errors[:,i], lw=1)
         pl.xlabel('error index')
         pl.ylabel('error ($m/s^2$)')
         pl.grid('on')
@@ -149,7 +136,7 @@ def plotAccelBias(cself, imu_idx, fno=1, clearFigure=True, noShow=False):
     plotVectorOverTime(times, acc_bias_spline, 
                        title="imu{0}: estimated accelerometer bias (imu frame)".format(imu_idx), 
                        ylabel="bias ($m/s^2$)", 
-                       fno=fno, clearFigure=clearFigure, noShow=noShow)
+                       fno=fno, clearFigure=clearFigure, noShow=noShow, lw=1)
 
     sigma_rw = cself.ImuList[imu_idx].getImuConfig().getAccelerometerStatistics()[1]
     bounds = 3. * sigma_rw * np.sqrt(times)
@@ -169,7 +156,7 @@ def plotAngularVelocityBias(cself, imu_idx, fno=1, clearFigure=True, noShow=Fals
     plotVectorOverTime(times, gyro_bias_spline, 
                        title="imu{0}: estimated gyro bias (imu frame)".format(imu_idx), 
                        ylabel="bias ($rad/s$)", 
-                       fno=fno, clearFigure=clearFigure, noShow=noShow)
+                       fno=fno, clearFigure=clearFigure, noShow=noShow, lw=1)
 
     sigma_rw = cself.ImuList[imu_idx].getImuConfig().getGyroStatistics()[1]
     bounds = 3. * sigma_rw * np.sqrt(times)
@@ -200,12 +187,12 @@ def plotAngularVelocities(cself, iidx, fno=1, clearFigure=True, noShow=False):
                        title="Comparison of predicted and measured angular velocities (body frame)", 
                        ylabel="ang. velocity ($rad/s$)", 
                        label="est. bodyspline",
-                       fno=fno, clearFigure=clearFigure, noShow=noShow, lw=3)
+                       fno=fno, clearFigure=clearFigure, noShow=noShow, lw=1)
     
     #plot measurements
     for r in range(0,3):
         ax=pl.subplot(3, 1, r+1)
-        pl.plot(times, measuredAng_body[r,:], 'x', lw=1, label="imu{0}".format(iidx))
+        pl.plot(times, measuredAng_body[r,:], ',', lw=1, label="imu{0}".format(iidx))
         pl.legend()
 
 def plotAccelerations(cself, iidx, fno=1, clearFigure=True, noShow=False):   
@@ -231,12 +218,12 @@ def plotAccelerations(cself, iidx, fno=1, clearFigure=True, noShow=False):
                        title="Comparison of predicted and measured specific force (imu0 frame)", 
                        ylabel="specific force ($m/s^2$)", 
                        label="est. bodyspline",
-                       fno=fno, clearFigure=clearFigure, noShow=noShow, lw=3)
+                       fno=fno, clearFigure=clearFigure, noShow=noShow, lw=1)
     
     #plot the measurements
     for r in range(0,3):
         ax=pl.subplot(3, 1, r+1)
-        pl.plot(times, measuredAccel_body[r,:], 'x', lw=1, label="imu{0}".format(iidx))
+        pl.plot(times, measuredAccel_body[r,:], ',', lw=1, label="imu{0}".format(iidx))
         pl.legend()
 
 def plotVectorOverTime(times, values, title="", ylabel="", label="", fno=1, clearFigure=True, noShow=False, lw=3):
