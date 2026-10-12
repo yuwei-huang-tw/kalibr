@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""Visualize exported camera poses and the IMU pose spline from kalibr.
+
+3D window  : camera poses and the body spline transformed into the camera
+             frame (T_w_c = T_w_b * inv(T_cam_imu)), or, with --raw-spline,
+             the original body (imu0) spline without any transformation.
+IMU windows: one window per IMU in --imuchain. Each shows the spline
+             acceleration (specific force) and angular velocity in that IMU's
+             frame, the measurements from the bag, and the effective control
+             points.
+
+Conventions:
+  * spline rotation vector: R_wb = exp(-[phi]x)  (verified against the data)
+  * spline time = camera time + timeshift_cam_imu
+  * spline time = IMU message stamp + imu time_offset (as in exportPoses)
+  * T_i_b maps body points into IMU i (like T_cam_imu): p_i = R_ib p_b + t_ib
+"""
+import argparse
+
+import numpy as np
+import yaml
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers "3d" on old matplotlib)
+from scipy.interpolate import BSpline
+from scipy.spatial.transform import Rotation as R
+
+SAMPLES_PER_SPAN = 10
+CAM = "cam0"
+ROT_SIGN = -1       # R_wb = exp(ROT_SIGN * [phi]x)
+GRAVITY = 9.81      # Kalibr fixes |g| = 9.81 (used only when estimating)
+
+
+# ----------------------------------------------------------------- loading
+def load_poses(filename):
+    # columns: t[ns], p(3), q(x,y,z,w)(4)  -> returned q is (w,x,y,z)
+    data = np.loadtxt(filename, delimiter=",", skiprows=1)
+    return {"t": data[:, 0] * 1e-9,
+            "p": data[:, 1:4],
+            "q": data[:, 4:8][:, [3, 0, 1, 2]]}
+
+
+def load_spline(filename):
+    knots, coeffs, order = {}, {}, None
+    with open(filename) as f:
+        next(f)  # header
+        for line in f:
+            parts = [p.strip() for p in line.strip().split(",")]
+            if not parts or not parts[0]:
+                continue
+            if parts[0] == "knot":
+                knots[int(parts[1])] = float(parts[2])
+                order = int(parts[3])
+            elif parts[0] == "coefficient":
+                coeffs[int(parts[1])] = [float(v) for v in parts[4:10]]
+    knots = np.array([knots[i] for i in sorted(knots)])
+    coeffs = np.array([coeffs[i] for i in sorted(coeffs)])  # (N, 6)
+    return knots, coeffs, order
+
+
+def load_T_ic(filename, cam=CAM):
+    """Read T_cam_imu from a Kalibr camchain-imucam yaml.
+    Returns (t_ic, timeshift) where (R_ic, t_ic) = inv(T_cam_imu)."""
+    with open(filename) as f:
+        cfg = yaml.safe_load(f)
+    if cam not in cfg:
+        raise KeyError(f"'{cam}' not found in {filename}; keys: {list(cfg)}")
+    T_ci = np.array(cfg[cam]["T_cam_imu"], dtype=float)
+    if T_ci.shape != (4, 4):
+        raise ValueError(f"T_cam_imu must be 4x4, got {T_ci.shape}")
+    R_ci, t_ci = T_ci[:3, :3], T_ci[:3, 3]
+    shift = cfg[cam].get("timeshift_cam_imu")
+    return -R_ci.T @ t_ci, float(shift) if shift is not None else 0.0
+
+
+def load_imuchain(filename):
+    """Read imu0, imu1, ... from a Kalibr imu yaml.
+    Returns a list of dicts: name, topic, offset, R_ib, t_ib."""
+    with open(filename) as f:
+        cfg = yaml.safe_load(f)
+    names = sorted((k for k in cfg if str(k).startswith("imu")),
+                   key=lambda k: int(str(k)[3:]) if str(k)[3:].isdigit() else 0)
+    if not names:
+        raise SystemExit(f"{filename}: no 'imuN' entries found")
+    imus = []
+    for name in names:
+        c = cfg[name]
+        T = np.array(c.get("T_i_b", np.eye(4)), dtype=float)
+        if T.shape != (4, 4):
+            raise ValueError(f"{name}/T_i_b must be 4x4, got {T.shape}")
+        imus.append({"name": name,
+                     "topic": c.get("rostopic"),
+                     "offset": float(c.get("time_offset", 0.0)),
+                     "R_ib": T[:3, :3],
+                     "t_ib": T[:3, 3]})
+    return imus
+
+
+def load_gravity(filename):
+    """Read the world-frame gravity vector [m/s^2] from a csv file.
+    Lines starting with '#' and non-numeric fields are ignored; exactly
+    three numbers must remain."""
+    vals = []
+    with open(filename) as f:
+        for line in f:
+            if line.lstrip().startswith("#"):
+                continue
+            for tok in line.replace(",", " ").replace(";", " ").split():
+                try:
+                    vals.append(float(tok))
+                except ValueError:
+                    pass
+    if len(vals) != 3:
+        raise SystemExit(f"{filename}: expected exactly 3 numbers "
+                         f"(gravity x, y, z), found {len(vals)}")
+    return np.array(vals)
+
+
+def load_imu_bag(bagfile, topics):
+    """Read sensor_msgs/Imu for several topics from a ROS1 bag (`rosbag`).
+    Returns {topic: (t, accel (N,3), gyro (N,3))}, sorted by time. t is the
+    header stamp (bag time if the stamp is zero)."""
+    import rosbag
+    out = {tp: ([], [], []) for tp in topics}
+    with rosbag.Bag(bagfile, "r") as bag:
+        info = bag.get_type_and_topic_info().topics
+        for tp in topics:
+            if tp not in info:
+                avail = ", ".join(f"{k} ({v.msg_type})" for k, v in info.items())
+                raise SystemExit(f"Topic '{tp}' not in {bagfile}. "
+                                 f"Available: {avail}")
+        for tp, m, bag_t in bag.read_messages(topics=list(topics)):
+            ts = m.header.stamp.to_sec()
+            if ts == 0.0:
+                ts = bag_t.to_sec()
+            t, acc, gyr = out[tp]
+            t.append(ts)
+            acc.append([m.linear_acceleration.x, m.linear_acceleration.y,
+                        m.linear_acceleration.z])
+            gyr.append([m.angular_velocity.x, m.angular_velocity.y,
+                        m.angular_velocity.z])
+    res = {}
+    for tp, (t, acc, gyr) in out.items():
+        order = np.argsort(t)
+        res[tp] = (np.array(t)[order], np.array(acc)[order].reshape(-1, 3),
+                   np.array(gyr)[order].reshape(-1, 3))
+    return res
+
+
+# ------------------------------------------------------------- spline math
+def rot_as_matrix(rot):
+    """Rotation -> matrices; as_matrix() needs SciPy >= 1.4, older has as_dcm()."""
+    return rot.as_matrix() if hasattr(rot, "as_matrix") else rot.as_dcm()
+
+
+def with_rot_sign(coeffs, s):
+    """Flip the rotation-vector channels once so that everything downstream
+    can use plain scipy conventions: R_wb = from_rotvec(phi_spline(t))."""
+    c = coeffs.copy()
+    c[:, 3:6] *= s
+    return c
+
+
+def sample_per_span(knots, degree, n_coeffs, t_start, t_end, per_span):
+    """`per_span` samples in each knot span; includes every knot time and
+    both window ends."""
+    valid = knots[degree:n_coeffs + 1]
+    bounds = np.unique(np.concatenate(
+        [[t_start, t_end], valid[(valid > t_start) & (valid < t_end)]]))
+    parts = [np.linspace(a, b, per_span, endpoint=False)
+             for a, b in zip(bounds[:-1], bounds[1:])]
+    return np.concatenate(parts + [[bounds[-1]]])
+
+
+def omega_from_phi(phi, dphi):
+    """World-frame angular velocity of R = exp([phi]x): J_l(phi) * dphi."""
+    theta = np.linalg.norm(phi, axis=1)[:, None]
+    small = theta < 1e-6
+    th = np.where(small, 1.0, theta)
+    a = np.where(small, 0.5, (1.0 - np.cos(th)) / th**2)
+    b = np.where(small, 1.0 / 6.0, (th - np.sin(th)) / th**3)
+    c1 = np.cross(phi, dphi)
+    return dphi + a * c1 + b * np.cross(phi, c1)
+
+
+def body_position(knots, coeffs, degree, t):
+    """Original (body / imu0) spline position, no transformation.
+    `t` is spline time."""
+    return BSpline(knots, coeffs[:, :3], degree)(t)
+
+
+def camera_position(knots, coeffs, degree, t, t_ic):
+    """p_c = p_b + R_wb * t_ic   (T_w_c = T_w_b * inv(T_cam_imu)).
+    `t` is spline time."""
+    pos_spl = BSpline(knots, coeffs[:, :3], degree)
+    rot_spl = BSpline(knots, coeffs[:, 3:6], degree)
+    return pos_spl(t) + R.from_rotvec(rot_spl(t)).apply(t_ic)
+
+
+def camera_control_points(coeffs, t_ic):
+    """Position control points shifted to the camera (visual approximation)."""
+    return coeffs[:, :3] + R.from_rotvec(coeffs[:, 3:6]).apply(t_ic)
+
+
+def imu_kinematics(knots, coeffs, degree, t, R_ib, t_ib):
+    """Kinematics of IMU i, whose pose is T_w_i = T_w_b * inv(T_i_b).
+    Returns R_wb (scipy Rotation of the body), a_world (N,3) of the IMU
+    origin (gravity not subtracted), omega_imu (N,3) in the IMU frame."""
+    pos_spl = BSpline(knots, coeffs[:, :3], degree)
+    rot_spl = BSpline(knots, coeffs[:, 3:6], degree)
+    drot_spl = rot_spl.derivative(1)
+    R_wb = R.from_rotvec(rot_spl(t))
+    w_w = omega_from_phi(rot_spl(t), drot_spl(t))
+    a_w = pos_spl.derivative(2)(t)
+
+    t_bi = -R_ib.T @ t_ib                       # IMU origin in the body frame
+    if np.linalg.norm(t_bi) > 0:                # lever arm terms
+        r = R_wb.apply(t_bi)
+        lo, hi = knots[degree], knots[len(coeffs)]
+        h = 1e-4
+        tp, tm = np.minimum(t + h, hi), np.maximum(t - h, lo)
+        alpha = (omega_from_phi(rot_spl(tp), drot_spl(tp))
+                 - omega_from_phi(rot_spl(tm), drot_spl(tm))) / (tp - tm)[:, None]
+        a_w = a_w + np.cross(alpha, r) + np.cross(w_w, np.cross(w_w, r))
+
+    w_i = R_wb.inv().apply(w_w) @ R_ib.T        # R_ib * omega_body
+    return R_wb, a_w, w_i
+
+
+def specific_force(R_wb, a_w, g_w, R_ib):
+    """f_i = R_wi^T (a_w - g) = R_ib R_wb^T (a_w - g); no gravity if g_w is None."""
+    return R_wb.inv().apply(a_w if g_w is None else a_w - g_w) @ R_ib.T
+
+
+def estimate_gravity(R_wb, a_w, acc_meas, R_ib):
+    """g = a_w - R_wi a_meas with R_wi = R_wb R_ib^T.
+    Direction from the mean, magnitude fixed to 9.81 (as Kalibr does)."""
+    g_mean = np.mean(a_w - R_wb.apply(acc_meas @ R_ib), axis=0)
+    return GRAVITY * g_mean / np.linalg.norm(g_mean), np.linalg.norm(g_mean)
+
+
+def deriv_cp(T, C, p):
+    """Control points of the derivative of a B-spline (knots T, degree p,
+    coefficients C (n,d)). Returns (T[1:-1], d (n-1,d), p-1)."""
+    n = len(C)
+    den = T[p + 1:p + n] - T[1:n]
+    den = np.where(den > 0, den, np.inf)       # repeated knots -> 0
+    d = p * (C[1:] - C[:-1]) / den[:, None]
+    return T[1:-1], d, p - 1
+
+
+def greville(T, q, n):
+    """Greville abscissae (time of maximal influence) of n coefficients of a
+    spline with knots T and degree q."""
+    return np.array([T[i + 1:i + q + 1].mean() for i in range(n)])
+
+
+def imu_control_points(knots, coeffs, degree, es, ee, g_w, R_ib, cp_every):
+    """Effective control points of the IMU-frame quantities of IMU i.
+
+    Control points of the 2nd derivative of the position spline and of the
+    1st derivative of the rotation-vector spline are exact; they are mapped
+    to the IMU frame like the curve (rotation at the Greville time,
+    gravity, J_l(phi), R_ib). The lever arm of an offset IMU is neglected
+    here, so the points are approximate (exact for T_i_b = identity up to
+    the nonlinearity of the rotation). Only points with Greville time in
+    [es, ee] are kept, then thinned with cp_every.
+    Returns (t_acc, acc_cp, t_gyr, gyr_cp) in spline time."""
+    rot_spl = BSpline(knots, coeffs[:, 3:6], degree)
+
+    T, C, q = knots, coeffs[:, :3], degree
+    for _ in range(2):
+        T, C, q = deriv_cp(T, C, q)
+    tg = greville(T, q, len(C))
+    sel = np.where((tg >= es) & (tg <= ee))[0][::cp_every]
+    t_a, C_a = tg[sel], C[sel]
+    acc_cp = specific_force(R.from_rotvec(rot_spl(t_a)), C_a, g_w, R_ib)
+
+    T, C, q = deriv_cp(knots, coeffs[:, 3:6], degree)
+    tg = greville(T, q, len(C))
+    sel = np.where((tg >= es) & (tg <= ee))[0][::cp_every]
+    t_g, C_g = tg[sel], C[sel]
+    phi = rot_spl(t_g)
+    gyr_cp = R.from_rotvec(phi).inv().apply(omega_from_phi(phi, C_g)) @ R_ib.T
+    return t_a, acc_cp, t_g, gyr_cp
+
+
+# ---------------------------------------------------------------- plotting
+def set_equal_aspect(ax, pts):
+    mins, maxs = pts.min(axis=0), pts.max(axis=0)
+    center = (mins + maxs) / 2
+    half = max((maxs - mins).max() / 2, 1e-6)
+    ax.set_xlim(center[0] - half, center[0] + half)
+    ax.set_ylim(center[1] - half, center[1] + half)
+    ax.set_zlim(center[2] - half, center[2] + half)
+    if hasattr(ax, "set_box_aspect"):
+        ax.set_box_aspect((1, 1, 1))
+
+
+def plot_imu(name, t_s, acc_s, gyr_s, t_m=None, acc_m=None, gyr_m=None,
+             with_gravity=True, cp=None, cp_every=1):
+    """One window: spline vs measured acceleration / angular velocity of one IMU.
+    cp = (t_acc, acc_cp, t_gyr, gyr_cp) in camera time since first pose."""
+    fig, axes = plt.subplots(2, 3, sharex=True, figsize=(15, 7))
+    acc_label = ("specific force [m/s²]" if with_gravity
+                 else "acceleration, no gravity [m/s²]")
+    for k, axis in enumerate("xyz"):
+        for row, (ts_, ys, tm_, ym, lab) in enumerate((
+                (t_s, acc_s, t_m, acc_m, acc_label),
+                (t_s, gyr_s, t_m, gyr_m, "angular velocity [rad/s]"))):
+            ax = axes[row, k]
+            if ym is not None:
+                ax.scatter(tm_, ym[:, k], s=5, color="tab:grey", label="measured")
+            ax.plot(ts_, ys[:, k], color="tab:red", lw=1.2, label="spline")
+            if cp is not None:
+                tc, vc = (cp[0], cp[1]) if row == 0 else (cp[2], cp[3])
+                ax.scatter(tc, vc[:, k], color="tab:orange", s=14, marker="^",
+                           zorder=3, label=f"control points (every {cp_every})")
+            ax.set_title(axis)
+            ax.grid(True, alpha=0.3)
+            if k == 0:
+                ax.set_ylabel(lab)
+            if row == 1:
+                ax.set_xlabel("camera time since first pose [s]")
+    axes[0, 0].legend(loc="upper right")
+    fig.suptitle(f"{name}: spline vs measured (IMU frame)")
+    try:
+        fig.canvas.set_window_title(name)
+    except Exception:
+        pass
+    fig.tight_layout()
+
+
+# -------------------------------------------------------------------- main
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--poses", required=True, help="poses csv (t, p, q)")
+    ap.add_argument("--spline", required=True, help="pose spline csv")
+    ap.add_argument("--camchain", required=True,
+                    help="Kalibr camchain-imucam yaml (uses cam0/T_cam_imu)")
+    ap.add_argument("--imuchain", required=True,
+                    help="Kalibr imu yaml (imu0, imu1, ...: rostopic, "
+                         "time_offset, T_i_b); one window per IMU")
+    ap.add_argument("--bag", help="ROS1 bag with the IMU topics "
+                                  "(measured values)")
+    ap.add_argument("--gravity",
+                    help="csv file with the world-frame gravity vector "
+                         "[m/s^2] (3 numbers); if omitted, it is estimated "
+                         "from the bag")
+    ap.add_argument("--timespan", nargs=2, type=float, metavar=("START", "END"),
+                    help="plot window [s], relative to the first pose")
+    ap.add_argument("--axes-every", type=int, default=0, metavar="N",
+                    help="draw orientation triad every N poses (0 = off)")
+    ap.add_argument("--cp-every", type=int, default=1, metavar="N",
+                    help="draw every Nth control point (default: 1)")
+    ap.add_argument("--raw-spline", action="store_true",
+                    help="3D window: draw the original body (imu0) spline and "
+                         "its control points instead of the spline "
+                         "transformed into the camera frame")
+    args = ap.parse_args()
+
+    # ---- load ----
+    poses = load_poses(args.poses)
+    t = poses["t"]            # camera time
+    t0 = t[0]
+    t1 = t[-1]
+    knots, coeffs_raw, order = load_spline(args.spline)
+    degree = order - 1
+    valid_min, valid_max = knots[degree], knots[len(coeffs_raw)]
+    t_ic, shift = load_T_ic(args.camchain)
+    imus = load_imuchain(args.imuchain)
+    coeffs = with_rot_sign(coeffs_raw, ROT_SIGN)
+    t_spl = t + shift         # poses mapped to spline time
+
+    if args.bag:
+        imu_topics = [i["topic"] for i in imus if i["topic"]]
+        bag_data = load_imu_bag(args.bag, imu_topics)
+
+    g_file = None
+    if args.gravity:
+        g_file = load_gravity(args.gravity)
+
+    # ---- data info ----
+    if g_file is not None:
+        print(f"=== Gravity ===\n"
+              f"g = [{g_file[0]:+.4f} {g_file[1]:+.4f} {g_file[2]:+.4f}] m/s², "
+              f"|g| = {np.linalg.norm(g_file):.4f}")
+    rate = (len(t) - 1) / (t[-1] - t[0]) if len(t) > 1 else float("nan")
+    print(f"=== Poses ===\n"
+          f"{len(t)} samples, t = [{t[0]:.6f}, {t[-1]:.6f}] s, "
+          f"duration = {t[-1] - t[0]:.3f} s, ~{rate:.1f} Hz")
+    print(f"=== Spline ===\n"
+          f"{len(knots)} knots, {len(coeffs)} coefficients, order {order}, "
+          f"t = [{valid_min:.6f}, {valid_max:.6f}] s, "
+          f"duration = {valid_max - valid_min:.3f} s")
+    print(f"=== Transform ===\n"
+          f"t_ic = [{t_ic[0]:+.4f} {t_ic[1]:+.4f} {t_ic[2]:+.4f}] m, "
+          f"|t_ic| = {np.linalg.norm(t_ic):.4f} m")
+    print(f"timeshift_cam_imu = t_spline - t_cam = {shift} s")
+    print("=== IMUs ===\n" + "\n".join(
+        f"{i['name']}: {i['topic']}, time_offset = {i['offset']} s" for i in imus))
+    print("======")
+
+    # ---- sanity check: camera curve vs poses file ----
+    inside = (t_spl >= valid_min) & (t_spl <= valid_max)
+    if not inside.any():
+        ap.error("poses and spline do not overlap in time")
+    pc = camera_position(knots, coeffs, degree, t_spl[inside], t_ic)
+    rms = np.sqrt(np.mean(np.sum((pc - poses["p"][inside])**2, axis=1)))
+    print(f"Position RMS, spline-camera vs poses file: {rms:.4f} m")
+    if args.raw_spline:
+        pb = body_position(knots, coeffs, degree, t_spl[inside])
+        rms_b = np.sqrt(np.mean(np.sum((pb - poses["p"][inside])**2, axis=1)))
+        print(f"Position RMS, raw spline (imu0) vs poses file: {rms_b:.4f} m "
+              f"(includes the camera-IMU lever arm)")
+
+    # ---- timespan (camera time) ----
+    if args.timespan:
+        ts, te = args.timespan[0] + t0, args.timespan[1] + t0
+        if te <= ts:
+            ap.error("--timespan END must be greater than START")
+        print(f"Plotting window: [{ts - t0:.3f}, {te - t0:.3f}] s since first pose")
+    else:
+        ts, te = t0, t1
+
+    mask = (t >= ts) & (t <= te)
+    if not mask.any():
+        ap.error("no pose samples inside the requested timespan")
+    p = poses["p"][mask]
+    quats = poses["q"][mask]
+
+    # ---- spline in camera frame or raw (window converted to spline time) ----
+    es, ee = max(ts + shift, valid_min), min(te + shift, valid_max)
+    spline_curve = np.empty((0, 3))
+    ctrl_pts = np.empty((0, 3))
+    spline_t = None
+    if ee <= es:
+        print("Warning: timespan does not overlap the spline's valid domain; "
+              "spline not drawn.")
+    else:
+        spline_t = sample_per_span(knots, degree, len(coeffs), es, ee,
+                                   SAMPLES_PER_SPAN)
+        i = np.arange(len(coeffs))
+        cmask = (knots[i + order] >= es) & (knots[i] <= ee)
+        if args.raw_spline:
+            spline_curve = body_position(knots, coeffs, degree, spline_t)
+            if args.cp_every >= 1:
+                ctrl_pts = coeffs[cmask, :3][::args.cp_every]
+        else:
+            spline_curve = camera_position(knots, coeffs, degree, spline_t, t_ic)
+            if args.cp_every >= 1:
+                ctrl_pts = camera_control_points(coeffs[cmask], t_ic)[::args.cp_every]
+
+    # ---- IMU measurements (one bag pass for all topics) ----
+    meas = {}
+    if args.bag:
+        for imu in imus:
+            if not imu["topic"]:
+                print(f"{imu['name']}: no rostopic in imuchain, skipped.")
+                continue
+            tb, accb, gyrb = bag_data[imu["topic"]]
+            if len(tb) == 0:
+                print(f"{imu['name']}: no messages on {imu['topic']}.")
+                continue
+            ts_spl = tb + imu["offset"]               # spline time of each message
+            ok = (ts_spl >= valid_min) & (ts_spl <= valid_max)
+            print(f"{imu['name']}: {len(tb)} messages on {imu['topic']}, "
+                  f"t = [{tb[0]:.6f}, {tb[-1]:.6f}] s, {ok.sum()} inside the spline")
+            if ok.any():
+                meas[imu["name"]] = (ts_spl[ok], accb[ok], gyrb[ok])
+
+    # ---- gravity: file > estimate (first IMU with data, shared by all) ----
+    g_w = g_file
+    kin_cache = {}
+    for imu in imus:
+        if imu["name"] not in meas:
+            continue
+        ts_m, accm, gyrm = meas[imu["name"]]
+        R_wb, a_w, w_i = imu_kinematics(knots, coeffs, degree, ts_m,
+                                        imu["R_ib"], imu["t_ib"])
+        kin_cache[imu["name"]] = (R_wb, a_w, w_i)
+        g_est, g_norm = estimate_gravity(R_wb, a_w, accm, imu["R_ib"])
+        if g_w is None:
+            g_w = g_est
+            print(f"Gravity (estimated from {imu['name']}): "
+                  f"[{g_w[0]:+.3f} {g_w[1]:+.3f} {g_w[2]:+.3f}] m/s²  "
+                  f"(raw mean norm {g_norm:.3f})")
+        elif g_file is not None:
+            ang = np.degrees(np.arccos(np.clip(
+                g_w @ g_est / (np.linalg.norm(g_w) * np.linalg.norm(g_est)),
+                -1, 1)))
+            print(f"{imu['name']}: gravity estimate [{g_est[0]:+.3f} "
+                  f"{g_est[1]:+.3f} {g_est[2]:+.3f}] m/s²; angle to "
+                  f"--gravity file: {ang:.2f} deg")
+    if g_w is None:
+        print("No gravity available: IMU windows show acceleration without gravity.")
+
+    # ---- fit statistics per IMU ----
+    for imu in imus:
+        if imu["name"] not in meas:
+            continue
+        ts_m, accm, gyrm = meas[imu["name"]]
+        R_wb, a_w, w_i = kin_cache[imu["name"]]
+        f_pred = specific_force(R_wb, a_w, g_w, imu["R_ib"])
+        print(f"{imu['name']}: spline vs measured RMS: accel "
+              f"{np.sqrt(np.mean((f_pred - accm)**2)):.3f} m/s², "
+              f"gyro {np.sqrt(np.mean((w_i - gyrm)**2)):.4f} rad/s")
+
+    # ---- 3D figure ----
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot(p[:, 0], p[:, 1], p[:, 2], color="tab:blue", lw=1.5,
+            label="Camera poses (T_C0)")
+
+    spline_name = "imu0 / body, raw" if args.raw_spline else CAM
+    if len(spline_curve):
+        ax.plot(spline_curve[:, 0], spline_curve[:, 1], spline_curve[:, 2],
+                color="tab:red", lw=1.0, ls="--",
+                label=f"B-spline ({spline_name})")
+        if args.cp_every >= 1:
+            ax.plot(ctrl_pts[:, 0], ctrl_pts[:, 1], ctrl_pts[:, 2],
+                    color="gray", lw=0.6, alpha=0.6)
+            ax.scatter(ctrl_pts[:, 0], ctrl_pts[:, 1], ctrl_pts[:, 2],
+                    color="tab:orange", s=12, marker="^",
+                    label=f"Control points (every {args.cp_every})")
+
+    ax.scatter(*p[0], color="green", s=60, marker="o", label="Start")
+    ax.scatter(*p[-1], color="black", s=60, marker="X", label="End")
+
+    all_pts = np.vstack([p, spline_curve, ctrl_pts])
+    if args.axes_every > 0:
+        extent = (all_pts.max(axis=0) - all_pts.min(axis=0)).max()
+        L = 0.05 * extent
+        idx = np.arange(0, len(p), args.axes_every)
+        # q is (w,x,y,z); scipy expects (x,y,z,w)
+        rot = rot_as_matrix(R.from_quat(quats[idx][:, [1, 2, 3, 0]]))
+        for pos, Rm in zip(p[idx], rot):
+            for k, c in enumerate(("r", "g", "b")):
+                d = Rm[:, k] * L
+                ax.plot([pos[0], pos[0] + d[0]],
+                        [pos[1], pos[1] + d[1]],
+                        [pos[2], pos[2] + d[2]], color=c, lw=2)
+
+    set_equal_aspect(ax, all_pts)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_zlabel("z [m]")
+    title = ("Camera poses vs. raw pose spline (imu0)" if args.raw_spline
+             else "Camera poses vs. pose spline")
+    if args.timespan:
+        title += f"\n[{ts - t0:.2f}, {te - t0:.2f}] s since start"
+    ax.set_title(title)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+
+    # ---- one IMU window per IMU (camera time axis) ----
+    if spline_t is not None:
+        for imu in imus:
+            R_ib, t_ib, off = imu["R_ib"], imu["t_ib"], imu["offset"]
+            # IMU time axis: spline time = stamp + off, so stamp = spline_t - off.
+            # Plot on camera time since first pose: spline_t - shift - t0.
+            R_wb, a_w, gyr_s = imu_kinematics(knots, coeffs, degree, spline_t,
+                                              R_ib, t_ib)
+            acc_s = specific_force(R_wb, a_w, g_w, R_ib)
+            cp = None
+            if args.cp_every >= 1:
+                t_a, acc_cp, t_g, gyr_cp = imu_control_points(
+                    knots, coeffs, degree, es, ee, g_w, R_ib, args.cp_every)
+                cp = (t_a - shift - t0, acc_cp, t_g - shift - t0, gyr_cp)
+
+            t_m = acc_m = gyr_m = None
+            if imu["name"] in meas:
+                ts_m, accm, gyrm = meas[imu["name"]]
+                win = (ts_m >= es) & (ts_m <= ee)
+                t_m, acc_m, gyr_m = ts_m[win] - shift - t0, accm[win], gyrm[win]
+            plot_imu(f"{imu['name']} ({imu['topic']})",
+                     spline_t - shift - t0, acc_s, gyr_s, t_m, acc_m, gyr_m,
+                     with_gravity=g_w is not None, cp=cp,
+                     cp_every=args.cp_every)
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
