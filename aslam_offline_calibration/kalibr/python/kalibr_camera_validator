@@ -134,7 +134,7 @@ class CameraChainValidator(object):
                     np_image = np.array(self.bridge.compressed_imgmsg_to_cv2(msg))
                     if len(np_image.shape) > 2 and np_image.shape[2] == 3:
                         np_image = cv2.cvtColor(np_image, cv2.COLOR_BGR2GRAY)
-                elif msg.encoding == "rgb8" or msg.encoding == "bgra8":
+                elif msg.encoding == "rgb8" or msg.encoding == "bgr8" or msg.encoding == "bgra8":
                     np_image = np.array(self.bridge.imgmsg_to_cv2(msg, "mono8"))
                 else:
                     np_image = np.array(self.bridge.imgmsg_to_cv2(msg))
