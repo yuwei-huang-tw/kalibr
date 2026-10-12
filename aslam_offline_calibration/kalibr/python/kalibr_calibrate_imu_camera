@@ -95,6 +95,8 @@ def parseArgs():
     groupOpt.add_argument('--max-iter', type=int, default=30, dest='max_iter', help='Max. iterations (default: %(default)s)', required=False)
     groupOpt.add_argument('--recover-covariance', action='store_true', dest='recover_cov', help='Recover the covariance of the design variables.', required=False)
     groupOpt.add_argument('--timeoffset-padding', type=float, default=30.e-3, dest='timeoffset_padding', help='Maximum range in which the timeoffset may change during estimation [s] (default: %(default)s)', required=False)
+    groupOpt.add_argument('--pose-knots-per-second', type=int, default=100, dest='poseKnotsPerSecond', help='Number of pose knots per second (default: %(default)s)', required=False)
+    groupOpt.add_argument('--bias-knots-per-second', type=int, default=50, dest='biasKnotsPerSecond', help='Number of bias knots per second (default: %(default)s)', required=False)
 
     #Result options  
     outputSettings = parser.add_argument_group('Output options')
@@ -197,8 +199,8 @@ def main():
     print("")
     print("Building the problem")
     iCal.buildProblem(splineOrder=6, 
-                      poseKnotsPerSecond=100, 
-                      biasKnotsPerSecond=50, 
+                      poseKnotsPerSecond=parsed.poseKnotsPerSecond, 
+                      biasKnotsPerSecond=parsed.biasKnotsPerSecond, 
                       doPoseMotionError=False,
                       doBiasMotionError=True,
                       blakeZisserCam=-1,
