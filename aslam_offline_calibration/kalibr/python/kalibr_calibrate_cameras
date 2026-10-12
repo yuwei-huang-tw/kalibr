@@ -216,6 +216,8 @@ def main():
                 cam.geometry.projection().distortion().setParameters(distortion_prarameters[cam_id])
                 print("Using distortion parameters from yaml file")
             
+            if np.isnan(cam.geometry.projection().distortion().getParameters().flatten()).any():
+                cam.geometry.projection().distortion().setParameters(np.zeros_like(cam.geometry.projection().getParameters()))
             print("\tProjection initialized to: %s" % cam.geometry.projection().getParameters().flatten())
             print("\tDistortion initialized to: %s" % cam.geometry.projection().distortion().getParameters().flatten())
             
@@ -489,6 +491,8 @@ def main():
                         cam.geometry.projection().distortion().setParameters(distortion_prarameters[cam_id])
                         print("Using distortion parameters from yaml file")
                     
+                    if np.isnan(cam.geometry.projection().distortion().getParameters().flatten()).any():
+                        cam.geometry.projection().distortion().setParameters(np.zeros_like(cam.geometry.projection().getParameters()))
                     print("\tProjection initialized to: %s" % cam.geometry.projection().getParameters().flatten())
                     print("\tDistortion initialized to: %s" % cam.geometry.projection().distortion().getParameters().flatten())
                 
