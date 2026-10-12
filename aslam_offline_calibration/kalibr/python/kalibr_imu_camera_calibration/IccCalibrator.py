@@ -191,13 +191,27 @@ class IccCalibrator(object):
     
     def recoverCovariance(self):
         print("Recovering covariance...")
+        imu_covariance_blocks = [
+            (imu, [
+                imu.q_i_b_Dv.blockIndex(),
+                imu.r_b_Dv.blockIndex(),
+            ])
+            for imu in self.ImuList
+            if not imu.isReferenceImu
+        ]
+        time_blocks = [
+            self.CameraChain.camList[i].cameraTimeToImuTimeDv.blockIndex()
+            for i in range(len(self.CameraChain.camList))
+        ]
         brows = [
             self.CameraChain.camList[0].T_c_b_Dv.q.blockIndex(),
             self.CameraChain.camList[0].T_c_b_Dv.t.blockIndex(),
+            *time_blocks,
             *[
-                self.CameraChain.camList[i].cameraTimeToImuTimeDv.blockIndex()
-                for i in range(len(self.CameraChain.camList))
-            ]
+                block_index
+                for _, imu_blocks in imu_covariance_blocks
+                for block_index in imu_blocks
+            ],
         ]
         P = aopt.SparseBlockMatrixXd()
         try:
@@ -209,13 +223,24 @@ class IccCalibrator(object):
             self.cov_times = np.ones((len(self.CameraChain.camList), len(self.CameraChain.camList)), dtype=float) * np.nan
             self.std_trafo_ic = np.sqrt(self.cov_trafo_ic.diagonal())
             self.std_times = np.sqrt(self.cov_times.diagonal())
+            for imu, _ in imu_covariance_blocks:
+                imu.cov_T_i_b = np.ones((6, 6), dtype=float) * np.nan
             return
 
         #split and store the variance
         self.cov_trafo_ic = getPartialBlocks(P, brows[:2])
-        self.cov_times = getPartialBlocks(P, brows[2:])
+        self.cov_times = getPartialBlocks(P, brows[2:2 + len(time_blocks)])
         self.std_trafo_ic = np.sqrt(self.cov_trafo_ic.diagonal())
         self.std_times = np.sqrt(self.cov_times.diagonal())
+        for imu, imu_blocks in imu_covariance_blocks:
+            cov_q_r = getPartialBlocks(P, imu_blocks)
+            R_i_b = imu.q_i_b_Dv.toRotationMatrix()
+            r_b = imu.r_b_Dv.toEuclidean()
+
+            skew = lambda v: np.cross(np.eye(3), v)
+            J_T_i_b = np.block([[np.eye(3), np.zeros((3, 3))],
+                                [skew(R_i_b @ r_b), -R_i_b]])
+            imu.cov_T_i_b = J_T_i_b @ cov_q_r @ J_T_i_b.T
     
     def saveImuSetParametersYaml(self, resultFile):
         imuSetConfig = kc.ImuSetParameters(resultFile, True)

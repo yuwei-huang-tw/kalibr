@@ -556,8 +556,15 @@ class IccImu(object):
             self.data["model"] = "calibrated"
             self.imuNr = imuNr
 
-        def setImuPose(self, T_i_b):
+        def setImuPose(self, T_i_b, covariance=None):
             self.data["T_i_b"] = T_i_b.tolist()
+            if covariance is not None:
+                covariance = np.asarray(covariance)
+                if covariance.shape != (6, 6):
+                    raise ValueError("T_i_b covariance must have shape (6, 6)")
+                self.data["sigma_T_i_b"] = covariance.tolist()
+            else:
+                self.data.pop("sigma_T_i_b", None)
 
         def setTimeOffset(self, time_offset):
             self.data["time_offset"] = time_offset
@@ -570,6 +577,10 @@ class IccImu(object):
             kc.ImuParameters.printDetails(self, dest)
             print("  T_ib (imu0 to imu{0})".format(self.imuNr), file=dest)
             print(self.formatIndented("    ", np.array(self.data["T_i_b"])), file=dest)
+            if "sigma_T_i_b" in self.data:
+                std = np.sqrt(np.diag(self.data["sigma_T_i_b"]))
+                print("  T_ib standard deviation (rotation [rad], translation [m]):", file=dest)
+                print(self.formatIndented("    ", std), file=dest)
             print("  time offset with respect to IMU0: {0} [s]".format(self.data["time_offset"]), file=dest)
 
     def getImuConfig(self):
@@ -577,7 +588,10 @@ class IccImu(object):
         return self.imuConfig
 
     def updateImuConfig(self):
-        self.imuConfig.setImuPose(self.getTransformationFromBodyToImu().T())
+        self.imuConfig.setImuPose(
+            self.getTransformationFromBodyToImu().T(),
+            getattr(self, "cov_T_i_b", None),
+        )
         self.imuConfig.setTimeOffset(self.timeOffset)
 
     def __init__(self, imuConfig, parsed, isReferenceImu=True, estimateTimedelay=True, imuNr=0):
@@ -607,6 +621,7 @@ class IccImu(object):
         #initial estimates for multi IMU calibration
         self.q_i_b_prior = np.array([0., 0., 0., 1.]) 
         self.timeOffset = 0.0
+        self.cov_T_i_b = None
         
     class ImuMeasurement(object):
         def __init__(self, stamp, omega, alpha, Rgyro, Raccel):
