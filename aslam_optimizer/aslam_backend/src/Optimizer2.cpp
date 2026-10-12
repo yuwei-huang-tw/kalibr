@@ -364,8 +364,6 @@ namespace aslam {
 
             void Optimizer2::computeDiagonalCovariances(SparseBlockMatrix& outP, double lambda)
             {
-                SM_THROW(Exception, "Broken");
-
                 std::vector<std::pair<int, int> > blockIndices;
                 for (size_t i = 0; i < _designVariables.size(); ++i) {
                     blockIndices.push_back(std::make_pair(i, i));
@@ -373,10 +371,18 @@ namespace aslam {
                 computeCovarianceBlocks(blockIndices, outP, lambda);
             }
 
-    void Optimizer2::computeCovarianceBlocks(const std::vector<std::pair<int, int> > & /* blockIndices */, SparseBlockMatrix& /* outP */, double /* lambda */)
+    void Optimizer2::computeCovarianceBlocks(const std::vector<std::pair<int, int> > & blockIndices, SparseBlockMatrix& outP, double lambda)
             {
-                SM_THROW(Exception, "Broken");
+              boost::shared_ptr<BlockCholeskyLinearSystemSolver> solver_sp;
+              solver_sp.reset(new BlockCholeskyLinearSystemSolver());
+              // True here for creating the diagonal conditioning.
+              solver_sp->initMatrixStructure(_designVariables, _errorTerms, true);
 
+              _options.verbose && std::cout << "Setting the diagonal conditioner to: " << lambda << ".\n";
+              evaluateError(false);
+              solver_sp->setConstantConditioner(lambda);
+              solver_sp->buildSystem(_options.nThreads, false);
+              solver_sp->computeCovarianceBlocks(blockIndices, outP);
             }
 
 

@@ -22,6 +22,9 @@ def addSplineDesignVariables(problem, dvc, setActive=True, group_id=HELPER_GROUP
         dv.setActive(setActive)
         problem.addDesignVariable(dv, group_id)
 
+def getPartialBlocks(bsm, brows):
+    return np.block([[bsm.getBlock(r, c) for c in brows] for r in brows])
+
 class IccCalibrator(object):
     def __init__(self):
         self.ImuList = []
@@ -179,27 +182,29 @@ class IccCalibrator(object):
             sm.logError("Optimization failed!")
             raise RuntimeError("Optimization failed!")
         
+        if recoverCov:
+            self.recoverCovariance()
         #free some memory
         del self.optimizer
         gc.collect()
-        if recoverCov:
-            self.recoverCovariance()
         
-
+    
     def recoverCovariance(self):
-        #Covariance ordering (=dv ordering)
-        #ORDERING:   N=num cams
-        #            1. transformation imu-cam0 --> 6
-        #            2. camera time2imu --> 1*numCams (only if enabled)
-        
         print("Recovering covariance...")
-        estimator = inc.IncrementalEstimator(CALIBRATION_GROUP_ID)
-        rval = estimator.addBatch(self.problem, True)    
-        est_covs = estimator.getSigma2Theta()
-        
+        brows = [
+            self.CameraChain.camList[0].T_c_b_Dv.q.blockIndex(),
+            self.CameraChain.camList[0].T_c_b_Dv.t.blockIndex(),
+            *[
+                self.CameraChain.camList[i].cameraTimeToImuTimeDv.blockIndex()
+                for i in range(len(self.CameraChain.camList))
+            ]
+        ]
+        P = aopt.SparseBlockMatrixXd()
+        self.optimizer.computePartialCovariances(brows, P, 1e-6)
+
         #split and store the variance
-        self.cov_trafo_ic = est_covs[0:6, 0:6]
-        self.cov_times = est_covs[6:, 6:]
+        self.cov_trafo_ic = getPartialBlocks(P, brows[:2])
+        self.cov_times = getPartialBlocks(P, brows[2:])
         self.std_trafo_ic = np.sqrt(self.cov_trafo_ic.diagonal())
         self.std_times = np.sqrt(self.cov_times.diagonal())
     

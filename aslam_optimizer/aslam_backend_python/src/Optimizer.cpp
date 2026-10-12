@@ -18,6 +18,19 @@ Eigen::VectorXd rhs(const aslam::backend::Optimizer * o)
 	return o->rhs();
 }
 
+void Optimizer2_computePartialCovariances(aslam::backend::Optimizer2 * o, const boost::python::list& bRows, sparse_block_matrix::SparseBlockMatrix<Eigen::MatrixXd>& outP, double lambda)
+{
+    int N = boost::python::len(bRows);
+    std::vector<std::pair<int, int> > blockIndices;
+    blockIndices.reserve(N * N);
+    for (int r = 0; r < N; r++)
+        for (int c = 0; c < N; c++)
+            blockIndices.push_back({
+                boost::python::extract<int>(bRows[r]),
+                boost::python::extract<int>(bRows[c])
+            });
+    o->computeCovarianceBlocks(blockIndices, outP, lambda);
+}
 
 void exportOptimizer()
 {
@@ -157,6 +170,7 @@ void exportOptimizer()
         // Eigen::MatrixXd getDenseSparseCovariance(int di, int si);
         .def("computeCovariances", &Optimizer2::computeCovariances)
         .def("computeDiagonalCovariances", &Optimizer2::computeDiagonalCovariances)
+        .def("computePartialCovariances", &Optimizer2_computePartialCovariances)
         
         /// \brief Evaluate the error at the current state.
         .def("evaluateError", &Optimizer2::evaluateError)
