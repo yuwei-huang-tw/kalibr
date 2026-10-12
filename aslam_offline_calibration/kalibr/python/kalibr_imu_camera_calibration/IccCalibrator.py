@@ -195,11 +195,13 @@ class IccCalibrator(object):
         print("Recovering covariance...")
         estimator = inc.IncrementalEstimator(CALIBRATION_GROUP_ID)
         rval = estimator.addBatch(self.problem, True)    
-        est_stds = np.sqrt(estimator.getSigma2Theta().diagonal())
+        est_covs = estimator.getSigma2Theta()
         
         #split and store the variance
-        self.std_trafo_ic = np.array(est_stds[0:6])
-        self.std_times = np.array(est_stds[6:])
+        self.cov_trafo_ic = est_covs[0:6, 0:6]
+        self.cov_times = est_covs[6:, 6:]
+        self.std_trafo_ic = np.sqrt(self.cov_trafo_ic.diagonal())
+        self.std_times = np.sqrt(self.cov_times.diagonal())
     
     def saveImuSetParametersYaml(self, resultFile):
         imuSetConfig = kc.ImuSetParameters(resultFile, True)
@@ -208,7 +210,7 @@ class IccCalibrator(object):
             imuSetConfig.addImuParameters(imu_parameters=imuConfig)
         imuSetConfig.writeYaml(resultFile)
 
-    def saveCamChainParametersYaml(self, resultFile):    
+    def saveCamChainParametersYaml(self, resultFile, withCov=False):
         chain = self.CameraChain.chainConfig
         nCams = len(self.CameraChain.camList)
     
@@ -221,12 +223,14 @@ class IccCalibrator(object):
 
             #imu-cam trafos
             T_ci = self.CameraChain.getResultTrafoImuToCam(camNr)
-            chain.setExtrinsicsImuToCam(camNr, T_ci)
+            cov = self.cov_trafo_ic if withCov and camNr == 0 else None
+            chain.setExtrinsicsImuToCam(camNr, T_ci, cov)
 
             if not self.noTimeCalibration:
                 #imu to cam timeshift
                 timeshift = float(self.CameraChain.getResultTimeShift(camNr))
-                chain.setTimeshiftCamImu(camNr, timeshift)
+                cov_timeshift = self.cov_times if withCov and camNr == 0 else None
+                chain.setTimeshiftCamImu(camNr, timeshift, cov_timeshift)
              
         try:
             chain.writeYaml(resultFile)

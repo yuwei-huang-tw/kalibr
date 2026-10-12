@@ -377,6 +377,21 @@ class CameraParameters(ParametersBase):
     def setResolution(self, resolution):
         self.checkResolution(resolution)
         self.data["resolution"] = resolution
+
+    #covariance
+    def checkCovariance(self, cov):
+        M = len(self.data["distortion_coeffs"]) + len(self.data["intrinsics"])
+        shape = np.array(cov).shape
+        if shape != (M, M):
+            self.raiseError("covariance requires {} coefficients; {} given".format((M, M), shape))
+
+    def getCovariance(self):
+        self.checkCovariance(self.data["distortion_projection_covariance"])
+        return self.data["distortion_projection_covariance"]
+    
+    def setCovariance(self, cov):
+        self.checkCovariance(cov)
+        self.data["distortion_projection_covariance"] = np.array(cov).tolist()
     
     ###################################################
     # Helpers
@@ -676,13 +691,18 @@ class CameraChainParameters(ParametersBase):
         param.setYamlDict( self.data['cam{0}'.format(nr)] )
         return param
     
-    def setExtrinsicsLastCamToHere(self, camNr, extrinsics):
+    def setExtrinsicsLastCamToHere(self, camNr, extrinsics, covariance=None):
         if camNr==0:
             raise RuntimeError("setExtrinsicsLastCamToHere(): can't set extrinsics for first cam in chain (cam0=base)")
         if not isinstance(extrinsics, sm.Transformation):
             raise RuntimeError("setExtrinsicsLastCamToHere(): provide extrinsics as an sm.Transformation object")
         
         self.data["cam{0}".format(camNr)]['T_cn_cnm1'] = extrinsics.T().tolist()
+        if covariance is not None:
+            shape = np.array(covariance).shape
+            if shape != (6, 6):
+                self.raiseError("covariance requires (6, 6) coefficients; {} given".format(shape))
+            self.data["cam{0}".format(camNr)]['sigma_T_cn_cnm1'] = np.array(covariance).tolist()
 
     @catch_keyerror
     def getExtrinsicsLastCamToHere(self, camNr):
@@ -699,11 +719,16 @@ class CameraChainParameters(ParametersBase):
             self.raiseError("invalid camera baseline (cam{0} in {1})".format(camNr, self.yamlFile))
         return trafo
     
-    def setExtrinsicsImuToCam(self, camNr, extrinsics):
+    def setExtrinsicsImuToCam(self, camNr, extrinsics, covariance=None):
         if not isinstance(extrinsics, sm.Transformation):
             raise RuntimeError("setExtrinsicsImuToCam(): provide extrinsics as an sm.Transformation object")
         
         self.data["cam{0}".format(camNr)]['T_cam_imu'] = extrinsics.T().tolist()
+        if covariance is not None:
+            shape = np.array(covariance).shape
+            if shape != (6, 6):
+                self.raiseError("covariance requires (6, 6) coefficients; {} given".format(shape))
+            self.data["cam{0}".format(camNr)]['sigma_T_cam_imu'] = np.array(covariance).tolist()
     
     @catch_keyerror
     def getExtrinsicsImuToCam(self, camNr):      
@@ -729,9 +754,11 @@ class CameraChainParameters(ParametersBase):
         self.checkTimeshiftCamImu(camNr, self.data["cam{0}".format(camNr)]["timeshift_cam_imu"])       
         return self.data["cam{0}".format(camNr)]["timeshift_cam_imu"]
     
-    def setTimeshiftCamImu(self, camNr, time_shift):
+    def setTimeshiftCamImu(self, camNr, time_shift, cov_time_shift=None):
         self.checkTimeshiftCamImu(camNr, time_shift)
         self.data["cam{0}".format(camNr)]["timeshift_cam_imu"] = time_shift
+        if cov_time_shift is not None:
+            self.data["cam{0}".format(camNr)]["sigma_timeshift_cam_imu"] = np.array(cov_time_shift).tolist()
 
     def checkCamOverlaps(self, camNr, overlap_list):
         if camNr >= self.numCameras():

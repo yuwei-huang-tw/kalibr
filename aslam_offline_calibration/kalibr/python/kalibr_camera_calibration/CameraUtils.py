@@ -303,28 +303,32 @@ def recoverCovariance(cself):
     #                c) shutter    --> 0
     
     numCams = len(cself.cameras)
-    est_stds = np.sqrt(cself.estimator.getSigma2Theta().diagonal())
+    est_covs = cself.estimator.getSigma2Theta()
 
     #split the variance for baselines
-    baseline_cov = est_stds[0:6*(numCams-1)]
-    std_baselines = np.array(baseline_cov).reshape(numCams-1,6).tolist()
+    cov_baselines = [est_covs[6*i:6*(i+1), 6*i:6*(i+1)] for i in range(numCams-1)]
     
     #split camera cov
-    cam_cov = est_stds[6*(numCams-1):]
-    std_cameras = list()
+    cov_cameras = []
     
-    offset=0
-    for cidx, cam in enumerate(cself.cameras):
+    offset = 6*(numCams-1)
+    for cam in cself.cameras:
         nt = cam.geometry.minimalDimensionsDistortion() +  \
              cam.geometry.minimalDimensionsProjection() +  \
              cam.geometry.minimalDimensionsShutter()
         
-        std_cameras.append( cam_cov[offset:offset+nt].flatten().tolist() )
-        offset = offset+nt
+        cov_cameras.append(est_covs[offset:offset+nt, offset:offset+nt])
+        offset += nt
     
+    return cov_baselines, cov_cameras
+
+def recoverStdDeviation(cself):
+    cov_baselines, cov_cameras = recoverCovariance(cself)
+    std_baselines = [np.sqrt(cov_baseline.diagonal()).tolist() for cov_baseline in cov_baselines]
+    std_cameras = [np.sqrt(cov_camera.diagonal()).tolist() for cov_camera in cov_cameras]
     return std_baselines, std_cameras
 
-def saveChainParametersYaml(cself, resultFile, graph):
+def saveChainParametersYaml(cself, resultFile, graph, withCov=False):
     cameraModels = {acvb.DistortedPinhole: 'pinhole',
                     acvb.EquidistantPinhole: 'pinhole',
                     acvb.FovPinhole: 'pinhole',
@@ -339,6 +343,9 @@ def saveChainParametersYaml(cself, resultFile, graph):
                         acvb.DistortedOmni: 'radtan',
                         acvb.ExtendedUnified: 'none',
                         acvb.DoubleSphere: 'none'}
+
+    if withCov:
+        cov_baselines, cov_cameras = recoverCovariance(cself)
 
     chain = cr.CameraChainParameters(resultFile, createYaml=True)
     for cam_id, cam in enumerate(cself.cameras):
@@ -364,6 +371,8 @@ def saveChainParametersYaml(cself, resultFile, graph):
         camParams.setResolution( [P.ru(), P.rv()] )
         dist_coeffs = P.distortion().getParameters().flatten()
         camParams.setDistortion( distortionModel, dist_coeffs)
+        if withCov:
+            camParams.setCovariance(cov_cameras[cam_id])
 
         chain.addCameraAtEnd(camParams)
 
@@ -375,7 +384,8 @@ def saveChainParametersYaml(cself, resultFile, graph):
     for bidx, baseline_dv in enumerate(cself.baselines):
         baseline = sm.Transformation( baseline_dv.T() )
         camNr = bidx+1
-        chain.setExtrinsicsLastCamToHere(camNr, baseline)
+        cov_baseline = cov_baselines[bidx] if withCov else None
+        chain.setExtrinsicsLastCamToHere(camNr, baseline, cov_baseline)
 
     chain.writeYaml()
 
@@ -645,7 +655,7 @@ def printParameters(cself, dest=sys.stdout):
     print("====================", file=dest)
 
     #get the covariances
-    std_baselines, std_cameras = recoverCovariance(cself)
+    std_baselines, std_cameras = recoverStdDeviation(cself)
 
     #print cameras
     print("Camera-system parameters:", file=dest)

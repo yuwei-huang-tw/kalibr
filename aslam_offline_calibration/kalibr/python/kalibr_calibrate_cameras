@@ -113,6 +113,7 @@ def parseArgs():
     outputSettings.add_argument('--show-extraction', action='store_true', dest='showextraction', help='Show the calibration target extraction. (disables plots)')
     outputSettings.add_argument('--plot', action='store_true', dest='plot', help='Plot during calibration (this could be slow).')
     outputSettings.add_argument('--dont-show-report', action='store_true', dest='dontShowReport', help='Do not show the report on screen after calibration.')
+    outputSettings.add_argument('--recover-covariance', action='store_true', dest='recover_cov', help='Recover the covariance of the design variables.', required=False)
     outputSettings.add_argument('--export-poses', action='store_true', dest='exportPoses', help='Export the optimized poses into a CSV (time_ns, position, quaterion)')
 
     #print help if no argument is specified
@@ -437,7 +438,7 @@ def main():
             #write to file
             bagtag = os.path.splitext(parsed.bagfile)[0]
             resultFile = bagtag + "-camchain.yaml"
-            kcc.saveChainParametersYaml(calibrator, resultFile, graph)
+            kcc.saveChainParametersYaml(calibrator, resultFile, graph, withCov=parsed.recover_cov)
             print("Results written to:")
             print("  Saving camera chain calibration to file: {0}".format(resultFile))
             
