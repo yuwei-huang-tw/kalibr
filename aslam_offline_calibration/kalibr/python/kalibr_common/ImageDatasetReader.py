@@ -42,14 +42,30 @@ class BagImageDatasetReader(object):
           "Please pass in a topic name referring to the image stream in the bag file\n{0}".format(self.bag))
 
     self.CVB = cv_bridge.CvBridge()
-    # Get the message indices
-    conx = self.bag._get_connections(topics=imagetopic)
-    indices = self.bag._get_indexes(conx)
+    # Get the message indices. Follow the image_transport convention: if the
+    # requested topic (e.g. /camera/left) is not in the bag, fall back to its
+    # compressed variant (/camera/left/compressed).
+    candidates = [imagetopic]
+    if not imagetopic.rstrip('/').endswith('/compressed'):
+      candidates.append(imagetopic.rstrip('/') + '/compressed')
 
-    try:
-      self.index = next(indices)
-    except:
-      raise RuntimeError("Could not find topic {0} in {1}.".format(imagetopic, self.bagfile))
+    self.index = None
+    for topic in candidates:
+      conx = list(self.bag._get_connections(topics=topic))
+      if not conx:
+        continue
+      try:
+        self.index = next(self.bag._get_indexes(conx))
+      except StopIteration:
+        continue
+      if topic != imagetopic:
+        sm.logInfo("BagImageDatasetReader: topic {0} not found, using {1}".format(imagetopic, topic))
+      self.topic = topic
+      break
+
+    if self.index is None:
+      raise RuntimeError("Could not find topic {0} in {1}.".format(
+          " or ".join(candidates), self.bagfile))
 
     self.indices = np.arange(len(self.index))
 
